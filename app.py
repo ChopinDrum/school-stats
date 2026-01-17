@@ -3,10 +3,10 @@ import requests
 import pandas as pd
 import time
 from datetime import datetime, timedelta
-import plotly.express as px  # 用于画交互式图表
+import plotly.express as px
 
 # ==========================================
-# 1. 核心爬虫逻辑 (保持不变，但去掉了print)
+# 1. 核心爬虫逻辑 (保持不变)
 # ==========================================
 class PPCrawler:
     def __init__(self, school_name, phone, password):
@@ -39,9 +39,6 @@ class PPCrawler:
         all_results = []
         page = 1
         
-        # 创建一个占位符用于更新进度
-        progress_text = f"正在抓取 {self.school_name} 数据..."
-        
         while True:
             params = {
                 "page": page, 
@@ -70,7 +67,6 @@ class PPCrawler:
 # ==========================================
 # 2. 数据处理函数
 # ==========================================
-@st.cache_data(ttl=3600) # 缓存数据1小时，防止重复点击按钮重复爬取
 def get_all_data(accounts, start_date, end_date):
     mapping = {
         'name': '任务名称',
@@ -115,14 +111,19 @@ def get_all_data(accounts, start_date, end_date):
 # 3. Streamlit 页面布局
 # ==========================================
 
-# 设置网页标题和图标
 st.set_page_config(page_title="多校教学数据看板", page_icon="📊", layout="wide")
+
+# --- 初始化 Session State ---
+# 如果缓存里没有数据，就初始化为空
+if 'data' not in st.session_state:
+    st.session_state['data'] = pd.DataFrame()
+if 'data_fetched' not in st.session_state:
+    st.session_state['data_fetched'] = False
 
 # 侧边栏：配置区
 with st.sidebar:
     st.header("⚙️ 查询设置")
     
-    # 日期选择器
     default_start = datetime.now() - timedelta(days=30)
     default_end = datetime.now()
     
@@ -130,7 +131,6 @@ with st.sidebar:
     start_date = col1.date_input("开始日期", default_start)
     end_date = col2.date_input("结束日期", default_end)
     
-    # 账号配置 (实际部署时建议放入 secrets 或配置文件)
     accounts = [
         {"name": "崂山实验", "phone": "15100000340", "pw": "000340"},
         {"name": "青岛实验高中", "phone": "15100000395", "pw": "000395"},
@@ -141,85 +141,86 @@ with st.sidebar:
         {"name": "十七中", "phone": "15100000497", "pw": "000497"},
     ]
     
-    fetch_btn = st.button("🚀 开始查询数据", type="primary")
+    # 点击按钮时，触发爬虫
+    if st.button("🚀 开始查询数据", type="primary"):
+        s_str = start_date.strftime("%Y-%m-%d")
+        e_str = end_date.strftime("%Y-%m-%d")
+        
+        with st.spinner('正在从服务器抓取最新数据，请稍候...'):
+            # 抓取数据并存入 Session State
+            st.session_state['data'] = get_all_data(accounts, s_str, e_str)
+            st.session_state['data_fetched'] = True # 标记为已抓取
 
-# 主页面
+# 主页面逻辑
 st.title("📊 多校联合教学数据看板")
 st.markdown(f"**当前查询范围：** {start_date} 至 {end_date}")
 
-if fetch_btn:
-    # 转换日期为字符串
-    s_str = start_date.strftime("%Y-%m-%d")
-    e_str = end_date.strftime("%Y-%m-%d")
+# 只有当数据已经抓取成功（Session State里有标记）时，才显示内容
+if st.session_state['data_fetched'] and not st.session_state['data'].empty:
+    df_all = st.session_state['data'] # 从缓存读取数据
     
-    with st.spinner('正在从服务器抓取最新数据，请稍候...'):
-        df_all = get_all_data(accounts, s_str, e_str)
+    st.success(f"数据加载完成！共获取 {len(df_all)} 条记录")
     
-    if not df_all.empty:
-        st.success(f"数据抓取完成！共获取 {len(df_all)} 条记录")
+    # --- 模块1：关键指标 (KPI) ---
+    st.subheader("1. 总体概览")
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("总任务数", len(df_all))
+    kpi2.metric("活跃教师数", df_all['老师'].nunique())
+    kpi3.metric("涉及学校", df_all['学校'].nunique())
+    kpi4.metric("批阅题空总量", int(df_all['批阅题空数'].sum()))
+    
+    st.divider() 
+    
+    # --- 模块2：图表展示 ---
+    col_chart1, col_chart2 = st.columns(2)
+    
+    with col_chart1:
+        st.subheader("各校任务量对比")
+        school_stats = df_all.groupby('学校').size().reset_index(name='任务数')
+        fig_bar = px.bar(school_stats, x='学校', y='任务数', color='任务数', 
+                         text_auto=True, title="各校任务总数")
+        st.plotly_chart(fig_bar, use_container_width=True)
         
-        # --- 模块1：关键指标 (KPI) ---
-        st.subheader("1. 总体概览")
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("总任务数", len(df_all))
-        kpi2.metric("活跃教师数", df_all['老师'].nunique())
-        kpi3.metric("涉及学校", df_all['学校'].nunique())
-        kpi4.metric("批阅题空总量", int(df_all['批阅题空数'].sum()))
-        
-        st.divider() # 分割线
-        
-        # --- 模块2：图表展示 ---
-        col_chart1, col_chart2 = st.columns(2)
-        
-        with col_chart1:
-            st.subheader("各校任务量对比")
-            # 按学校汇总
-            school_stats = df_all.groupby('学校').size().reset_index(name='任务数')
-            fig_bar = px.bar(school_stats, x='学校', y='任务数', color='任务数', 
-                             text_auto=True, title="各校任务总数")
-            st.plotly_chart(fig_bar, use_container_width=True)
-            
-        with col_chart2:
-            st.subheader("各校活跃教师对比")
-            teacher_stats = df_all.groupby('学校')['老师'].nunique().reset_index(name='人数')
-            fig_line = px.line(teacher_stats, x='学校', y='人数', markers=True, 
-                               title="活跃教师人数趋势")
-            st.plotly_chart(fig_line, use_container_width=True)
+    with col_chart2:
+        st.subheader("各校活跃教师对比")
+        teacher_stats = df_all.groupby('学校')['老师'].nunique().reset_index(name='人数')
+        fig_line = px.line(teacher_stats, x='学校', y='人数', markers=True, 
+                           title="活跃教师人数趋势")
+        st.plotly_chart(fig_line, use_container_width=True)
 
-        # 堆叠图：各校科目分布
-        st.subheader("各科目教师活跃度 (分学校堆叠)")
-        subject_stats = df_all.groupby(['科目', '学校'])['老师'].nunique().reset_index(name='人数')
-        fig_stack = px.bar(subject_stats, x='科目', y='人数', color='学校', 
-                           title="各科目投入师资力量分析", barmode='stack')
-        st.plotly_chart(fig_stack, use_container_width=True)
+    st.subheader("各科目教师活跃度 (分学校堆叠)")
+    subject_stats = df_all.groupby(['科目', '学校'])['老师'].nunique().reset_index(name='人数')
+    fig_stack = px.bar(subject_stats, x='科目', y='人数', color='学校', 
+                       title="各科目投入师资力量分析", barmode='stack')
+    st.plotly_chart(fig_stack, use_container_width=True)
 
-        st.divider()
+    st.divider()
 
-        # --- 模块3：详细数据表格 ---
-        st.subheader("3. 详细数据查询")
+    # --- 模块3：详细数据表格 ---
+    st.subheader("3. 详细数据查询")
+    
+    # 这里的筛选器交互会导致页面重新运行
+    # 但因为我们从 st.session_state['data'] 读取数据，所以数据不会丢失！
+    selected_school = st.multiselect("筛选学校", df_all['学校'].unique())
+    selected_subject = st.multiselect("筛选科目", df_all['科目'].unique())
+    
+    df_display = df_all.copy()
+    if selected_school:
+        df_display = df_display[df_display['学校'].isin(selected_school)]
+    if selected_subject:
+        df_display = df_display[df_display['科目'].isin(selected_subject)]
         
-        # 添加过滤器
-        selected_school = st.multiselect("筛选学校", df_all['学校'].unique())
-        selected_subject = st.multiselect("筛选科目", df_all['科目'].unique())
-        
-        df_display = df_all.copy()
-        if selected_school:
-            df_display = df_display[df_display['学校'].isin(selected_school)]
-        if selected_subject:
-            df_display = df_display[df_display['科目'].isin(selected_subject)]
-            
-        st.dataframe(df_display, use_container_width=True)
-        
-        # 下载按钮
-        csv = df_display.to_csv(index=False).encode('utf-8-sig')
-        st.download_button(
-            label="📥 下载当前表格为 Excel/CSV",
-            data=csv,
-            file_name=f'教学数据统计_{s_str}_{e_str}.csv',
-            mime='text/csv',
-        )
-        
-    else:
-        st.warning("未查询到数据，请检查网络或账号配置。")
+    st.dataframe(df_display, use_container_width=True)
+    
+    csv = df_display.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="📥 下载当前表格为 Excel/CSV",
+        data=csv,
+        file_name=f'教学数据统计.csv',
+        mime='text/csv',
+    )
+    
+elif st.session_state['data_fetched'] and st.session_state['data'].empty:
+    st.warning("未查询到数据，请检查网络或账号配置。")
 else:
     st.info("👈 请在左侧选择日期并点击【开始查询数据】按钮")
